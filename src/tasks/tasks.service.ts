@@ -1,88 +1,64 @@
-import { Injectable, NotFoundException } from '@nestjs/common';
-import { PrismaService } from '../prisma/prisma.service';
-import { EmailService } from '../email/email.service';
-import { CreateTaskDto } from './dto/create-task.dto';
-import { UpdateTaskDto } from './dto/update-task.dto';
-import { TaskFilterDto } from './dto/task-filter.dto';
-import { Task, Prisma } from '@prisma/client';
+import { Injectable, NotFoundException } from "@nestjs/common";
+import { PrismaService } from "../prisma/prisma.service";
+import { EmailService } from "../email/email.service";
+import { CreateTaskDto } from "./dto/create-task.dto";
+import { UpdateTaskDto } from "./dto/update-task.dto";
+import { TaskFilterDto } from "./dto/task-filter.dto";
+import { Prisma } from "@prisma/client";
 
 @Injectable()
 export class TasksService {
   constructor(
     private prisma: PrismaService,
-    private emailService: EmailService,
+    private emailService: EmailService
   ) {}
 
   async findAll(filterDto: TaskFilterDto) {
-    // PERFORMANCE ISSUE: N+1 Query Problem
-    // Fetching tasks without includes, then fetching related data separately
-    const tasks = await this.prisma.task.findMany();
-    
-    // For each task, fetch related data separately (N+1 problem)
-    const tasksWithRelations = await Promise.all(
-      tasks.map(async (task) => {
-        const assignee = task.assigneeId 
-          ? await this.prisma.user.findUnique({ where: { id: task.assigneeId } })
-          : null;
-        
-        const project = await this.prisma.project.findUnique({ 
-          where: { id: task.projectId } 
-        });
-        
-        const tags = await this.prisma.tag.findMany({
-          where: {
-            tasks: {
-              some: { id: task.id }
-            }
-          }
-        });
-
-        return {
-          ...task,
-          assignee,
-          project,
-          tags,
-        };
-      })
-    );
-
-    // PERFORMANCE ISSUE: In-memory filtering instead of database queries
-    let filteredTasks = tasksWithRelations;
+    // Build the where clause based on filters
+    const where: any = {};
 
     if (filterDto.status) {
-      filteredTasks = filteredTasks.filter(task => task.status === filterDto.status);
+      where.status = filterDto.status;
     }
 
     if (filterDto.priority) {
-      filteredTasks = filteredTasks.filter(task => task.priority === filterDto.priority);
+      where.priority = filterDto.priority;
     }
 
     if (filterDto.assigneeId) {
-      filteredTasks = filteredTasks.filter(task => task.assigneeId === filterDto.assigneeId);
+      where.assigneeId = filterDto.assigneeId;
     }
 
     if (filterDto.projectId) {
-      filteredTasks = filteredTasks.filter(task => task.projectId === filterDto.projectId);
+      where.projectId = filterDto.projectId;
     }
 
     if (filterDto.dueDateFrom || filterDto.dueDateTo) {
-      filteredTasks = filteredTasks.filter(task => {
-        if (!task.dueDate) return false;
-        const dueDate = new Date(task.dueDate);
-        
-        if (filterDto.dueDateFrom && dueDate < new Date(filterDto.dueDateFrom)) {
-          return false;
-        }
-        
-        if (filterDto.dueDateTo && dueDate > new Date(filterDto.dueDateTo)) {
-          return false;
-        }
-        
-        return true;
-      });
+      where.dueDate = {};
+
+      if (filterDto.dueDateFrom) {
+        where.dueDate.gte = new Date(filterDto.dueDateFrom);
+      }
+
+      if (filterDto.dueDateTo) {
+        where.dueDate.lte = new Date(filterDto.dueDateTo);
+      }
     }
 
-    return filteredTasks;
+    // Single optimized query with all relations included
+    const tasks = await this.prisma.task.findMany({
+      where,
+      include: {
+        assignee: true,
+        project: true,
+        tags: true,
+      },
+      orderBy: {
+        createdAt: "desc",
+      },
+    });
+
+    return tasks;
   }
 
   async findOne(id: string) {
@@ -111,11 +87,11 @@ export class TasksService {
         priority: createTaskDto.priority,
         dueDate: createTaskDto.dueDate,
         project: { connect: { id: createTaskDto.projectId } },
-        assignee: createTaskDto.assigneeId 
+        assignee: createTaskDto.assigneeId
           ? { connect: { id: createTaskDto.assigneeId } }
           : undefined,
         tags: createTaskDto.tagIds
-          ? { connect: createTaskDto.tagIds.map(id => ({ id })) }
+          ? { connect: createTaskDto.tagIds.map((id) => ({ id })) }
           : undefined,
       },
       include: {
@@ -125,12 +101,14 @@ export class TasksService {
       },
     });
 
-    // PERFORMANCE ISSUE: Synchronous email notification blocking response
+    // PERFORMANCE FIX: Send email asynchronously without blocking response
     if (task.assignee) {
-      await this.emailService.sendTaskAssignmentNotification(
-        task.assignee.email,
-        task.title
-      );
+      this.emailService
+        .sendTaskAssignmentNotification(task.assignee.email, task.title)
+        .catch((error) => {
+          // Log error but don't fail the request
+          console.error("Failed to send task assignment notification:", error);
+        });
     }
 
     return task;
@@ -138,7 +116,7 @@ export class TasksService {
 
   async update(id: string, updateTaskDto: UpdateTaskDto) {
     const existingTask = await this.findOne(id);
-    
+
     const task = await this.prisma.task.update({
       where: { id },
       data: {
@@ -147,13 +125,14 @@ export class TasksService {
         status: updateTaskDto.status,
         priority: updateTaskDto.priority,
         dueDate: updateTaskDto.dueDate,
-        assignee: updateTaskDto.assigneeId !== undefined
-          ? updateTaskDto.assigneeId 
-            ? { connect: { id: updateTaskDto.assigneeId } }
-            : { disconnect: true }
-          : undefined,
+        assignee:
+          updateTaskDto.assigneeId !== undefined
+            ? updateTaskDto.assigneeId
+              ? { connect: { id: updateTaskDto.assigneeId } }
+              : { disconnect: true }
+            : undefined,
         tags: updateTaskDto.tagIds
-          ? { set: updateTaskDto.tagIds.map(id => ({ id })) }
+          ? { set: updateTaskDto.tagIds.map((id) => ({ id })) }
           : undefined,
       },
       include: {
@@ -163,12 +142,17 @@ export class TasksService {
       },
     });
 
-    // PERFORMANCE ISSUE: Synchronous email notification blocking response
-    if (updateTaskDto.assigneeId && updateTaskDto.assigneeId !== existingTask.assigneeId) {
-      await this.emailService.sendTaskAssignmentNotification(
-        task.assignee!.email,
-        task.title
-      );
+    // PERFORMANCE FIX: Send email asynchronously without blocking response
+    if (
+      updateTaskDto.assigneeId &&
+      updateTaskDto.assigneeId !== existingTask.assigneeId
+    ) {
+      this.emailService
+        .sendTaskAssignmentNotification(task.assignee!.email, task.title)
+        .catch((error) => {
+          // Log error but don't fail the request
+          console.error("Failed to send task assignment notification:", error);
+        });
     }
 
     return task;
@@ -176,11 +160,11 @@ export class TasksService {
 
   async remove(id: string) {
     await this.findOne(id);
-    
+
     await this.prisma.task.delete({
       where: { id },
     });
 
-    return { message: 'Task deleted successfully' };
+    return { message: "Task deleted successfully" };
   }
 }
