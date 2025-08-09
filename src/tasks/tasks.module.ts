@@ -5,9 +5,10 @@ import { TaskCacheService } from "./task-cache.service";
 import { TaskQueryBuilder } from "./task-query-builder.service";
 import { EmailModule } from "../email/email.module";
 import { PrismaModule } from "../prisma/prisma.module";
+import { ActivitiesModule } from "../activities/activities.module";
 
 @Module({
-  imports: [EmailModule, PrismaModule],
+  imports: [EmailModule, PrismaModule, ActivitiesModule],
   controllers: [TasksController],
   providers: [TasksService, TaskCacheService, TaskQueryBuilder],
 })

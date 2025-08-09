@@ -4,6 +4,8 @@ import { TasksService } from "./tasks.service";
 import { TaskCacheService } from "./task-cache.service";
 import { TaskQueryBuilder } from "./task-query-builder.service";
 import { EmailService } from "../email/email.service";
+import { ActivitiesService } from "../activities/activities.service";
+import { ActivityTrackerService } from "../activities/activity-tracker.service";
 import { CreateTaskDto } from "./dto/create-task.dto";
 import { UpdateTaskDto } from "./dto/update-task.dto";
 import { TaskFilterDto } from "./dto/task-filter.dto";
@@ -13,15 +15,17 @@ describe("TasksService", () => {
   let mockTaskCache: any;
   let mockTaskQuery: any;
   let mockEmailService: any;
+  let mockActivitiesService: any;
+  let mockActivityTracker: any;
 
   beforeEach(async () => {
     mockTaskCache = {
       generateListCacheKey: jest.fn(),
       generateItemCacheKey: jest.fn(),
       wrapTaskQuery: jest.fn(),
-      cacheTask: jest.fn(),
-      invalidateListCaches: jest.fn(),
-      invalidateTaskCaches: jest.fn(),
+      cacheTask: jest.fn().mockResolvedValue(undefined),
+      invalidateListCaches: jest.fn().mockResolvedValue(undefined),
+      invalidateTaskCaches: jest.fn().mockResolvedValue(undefined),
       TASK_LIST_TTL: 300000,
       TASK_ITEM_TTL: 600000,
     };
@@ -38,6 +42,16 @@ describe("TasksService", () => {
       sendTaskAssignmentNotification: jest.fn(),
     };
 
+    mockActivitiesService = {
+      logTaskCreated: jest.fn(),
+      logTaskUpdated: jest.fn(),
+      logTaskDeleted: jest.fn(),
+    };
+
+    mockActivityTracker = {
+      detectTaskChanges: jest.fn(),
+    };
+
     const module: TestingModule = await Test.createTestingModule({
       providers: [
         TasksService,
@@ -52,6 +66,14 @@ describe("TasksService", () => {
         {
           provide: EmailService,
           useValue: mockEmailService,
+        },
+        {
+          provide: ActivitiesService,
+          useValue: mockActivitiesService,
+        },
+        {
+          provide: ActivityTrackerService,
+          useValue: mockActivityTracker,
         },
       ],
     }).compile();
@@ -234,6 +256,7 @@ describe("TasksService", () => {
         id: "new-task-id",
         ...createTaskDto,
         assignee: null,
+        project: { id: "project-123" },
       };
 
       mockTaskQuery.createTask.mockResolvedValue(createdTask);
@@ -289,6 +312,71 @@ describe("TasksService", () => {
 
       consoleSpy.mockRestore();
     });
+
+    it("should log task creation activity", async () => {
+      const createTaskDto: CreateTaskDto = {
+        title: "New Task",
+        description: "Task description",
+        status: "TODO",
+        priority: "HIGH",
+        projectId: "project-123",
+        assigneeId: "user-123",
+      };
+
+      const createdTask = {
+        id: "new-task-id",
+        ...createTaskDto,
+        assignee: { id: "user-123", email: "user@example.com" },
+        project: { id: "project-123" },
+      };
+
+      // Setup mocks specifically for this test
+      mockTaskQuery.createTask.mockResolvedValue(createdTask);
+      mockTaskCache.cacheTask.mockResolvedValue(undefined);
+      mockTaskCache.invalidateListCaches.mockResolvedValue(undefined);
+      mockActivitiesService.logTaskCreated.mockResolvedValue(undefined);
+      mockEmailService.sendTaskAssignmentNotification.mockResolvedValue(
+        undefined
+      );
+
+      await service.create(createTaskDto);
+
+      expect(mockActivitiesService.logTaskCreated).toHaveBeenCalledWith(
+        "new-task-id",
+        "user-123"
+      );
+    });
+
+    it("should handle activity logging errors gracefully during creation", async () => {
+      const createTaskDto: CreateTaskDto = {
+        title: "New Task",
+        projectId: "project-123",
+        assigneeId: "user-123",
+      };
+
+      const createdTask = {
+        id: "new-task-id",
+        ...createTaskDto,
+        project: { id: "project-123" },
+      };
+
+      mockTaskQuery.createTask.mockResolvedValue(createdTask);
+      mockActivitiesService.logTaskCreated.mockRejectedValue(
+        new Error("Activity log failed")
+      );
+
+      const consoleSpy = jest.spyOn(console, "error").mockImplementation();
+
+      const result = await service.create(createTaskDto);
+
+      expect(consoleSpy).toHaveBeenCalledWith(
+        "Failed to log task creation activity:",
+        expect.any(Error)
+      );
+      expect(result).toBe(createdTask);
+
+      consoleSpy.mockRestore();
+    });
   });
 
   describe("update", () => {
@@ -299,7 +387,12 @@ describe("TasksService", () => {
         status: "IN_PROGRESS",
       };
 
-      const existingTask = { id: taskId, title: "Old Task", assigneeId: null };
+      const existingTask = {
+        id: taskId,
+        title: "Old Task",
+        assigneeId: null,
+        project: { id: "project-123" },
+      };
       const updatedTask = { id: taskId, ...updateTaskDto };
 
       jest.spyOn(service, "findOne").mockResolvedValue(existingTask as any);
@@ -327,7 +420,11 @@ describe("TasksService", () => {
         assigneeId: "new-user-123",
       };
 
-      const existingTask = { id: taskId, assigneeId: "old-user-123" };
+      const existingTask = {
+        id: taskId,
+        assigneeId: "old-user-123",
+        project: { id: "project-123" },
+      };
       const updatedTask = {
         id: taskId,
         title: "Task Title",
@@ -346,12 +443,130 @@ describe("TasksService", () => {
         mockEmailService.sendTaskAssignmentNotification
       ).toHaveBeenCalledWith("newuser@example.com", updatedTask.title);
     });
+
+    it("should log update activity with changes", async () => {
+      const taskId = "task-123";
+      const updateTaskDto: UpdateTaskDto = {
+        title: "Updated Task",
+        status: "IN_PROGRESS",
+        priority: "HIGH",
+      };
+
+      const existingTask = {
+        id: taskId,
+        title: "Original Task",
+        status: "TODO",
+        priority: "MEDIUM",
+        assigneeId: "user-123",
+        project: { id: "project-123" },
+        tags: [],
+      };
+
+      const updatedTask = {
+        ...existingTask,
+        ...updateTaskDto,
+      };
+
+      const detectedChanges = {
+        title: { old: "Original Task", new: "Updated Task" },
+        status: { old: "TODO", new: "IN_PROGRESS" },
+        priority: { old: "MEDIUM", new: "HIGH" },
+      };
+
+      mockTaskCache.wrapTaskQuery.mockResolvedValue(existingTask);
+      jest.spyOn(service, "findOne").mockResolvedValue(existingTask as any);
+      mockTaskQuery.updateTask.mockResolvedValue(updatedTask);
+      mockActivityTracker.detectTaskChanges.mockReturnValue(detectedChanges);
+      mockActivitiesService.logTaskUpdated.mockResolvedValue(undefined);
+
+      await service.update(taskId, updateTaskDto);
+
+      expect(mockActivityTracker.detectTaskChanges).toHaveBeenCalledWith(
+        existingTask,
+        expect.objectContaining({
+          title: "Updated Task",
+          status: "IN_PROGRESS",
+          priority: "HIGH",
+        })
+      );
+
+      expect(mockActivitiesService.logTaskUpdated).toHaveBeenCalledWith(
+        taskId,
+        "user-123",
+        detectedChanges
+      );
+    });
+
+    it("should not log activity when no changes detected", async () => {
+      const taskId = "task-123";
+      const updateTaskDto: UpdateTaskDto = {
+        title: "Same Task",
+      };
+
+      const existingTask = {
+        id: taskId,
+        title: "Same Task",
+        assigneeId: "user-123",
+        project: { id: "project-123" },
+      };
+
+      mockTaskCache.wrapTaskQuery.mockResolvedValue(existingTask);
+      jest.spyOn(service, "findOne").mockResolvedValue(existingTask as any);
+      mockTaskQuery.updateTask.mockResolvedValue(existingTask);
+      mockActivityTracker.detectTaskChanges.mockReturnValue({});
+
+      await service.update(taskId, updateTaskDto);
+
+      expect(mockActivitiesService.logTaskUpdated).not.toHaveBeenCalled();
+    });
+
+    it("should handle activity logging errors during update", async () => {
+      const taskId = "task-123";
+      const updateTaskDto: UpdateTaskDto = { title: "Updated Task" };
+
+      const existingTask = {
+        id: taskId,
+        title: "Original Task",
+        assigneeId: "user-123",
+        project: { id: "project-123" },
+      };
+
+      const detectedChanges = {
+        title: { old: "Original Task", new: "Updated Task" },
+      };
+
+      mockTaskCache.wrapTaskQuery.mockResolvedValue(existingTask);
+      jest.spyOn(service, "findOne").mockResolvedValue(existingTask as any);
+      mockTaskQuery.updateTask.mockResolvedValue({
+        ...existingTask,
+        ...updateTaskDto,
+      });
+      mockActivityTracker.detectTaskChanges.mockReturnValue(detectedChanges);
+      mockActivitiesService.logTaskUpdated.mockRejectedValue(
+        new Error("Activity log failed")
+      );
+
+      const consoleSpy = jest.spyOn(console, "error").mockImplementation();
+
+      await service.update(taskId, updateTaskDto);
+
+      expect(consoleSpy).toHaveBeenCalledWith(
+        "Failed to log task update activity:",
+        expect.any(Error)
+      );
+
+      consoleSpy.mockRestore();
+    });
   });
 
   describe("remove", () => {
     it("should delete task and invalidate cache", async () => {
       const taskId = "task-123";
-      const existingTask = { id: taskId, title: "Task to delete" };
+      const existingTask = {
+        id: taskId,
+        title: "Task to delete",
+        project: { id: "project-123" },
+      };
 
       jest.spyOn(service, "findOne").mockResolvedValue(existingTask as any);
       mockTaskQuery.deleteTask.mockResolvedValue(undefined);
@@ -371,6 +586,56 @@ describe("TasksService", () => {
 
       await expect(service.remove(taskId)).rejects.toThrow(NotFoundException);
       expect(mockTaskQuery.deleteTask).not.toHaveBeenCalled();
+    });
+
+    it("should log deletion activity before removing task", async () => {
+      const taskId = "task-123";
+      const existingTask = {
+        id: taskId,
+        title: "Task to delete",
+        assigneeId: "user-123",
+        project: { id: "project-123" },
+      };
+
+      jest.spyOn(service, "findOne").mockResolvedValue(existingTask as any);
+      mockTaskQuery.deleteTask.mockResolvedValue(undefined);
+      mockActivitiesService.logTaskDeleted.mockResolvedValue(undefined);
+
+      await service.remove(taskId);
+
+      expect(mockActivitiesService.logTaskDeleted).toHaveBeenCalledWith(
+        taskId,
+        "user-123"
+      );
+      // Verify deletion activity is logged before actual deletion
+      expect(mockActivitiesService.logTaskDeleted).toHaveBeenCalled();
+    });
+
+    it("should handle activity logging errors during deletion", async () => {
+      const taskId = "task-123";
+      const existingTask = {
+        id: taskId,
+        title: "Task to delete",
+        assigneeId: "user-123",
+      };
+
+      jest.spyOn(service, "findOne").mockResolvedValue(existingTask as any);
+      mockTaskQuery.deleteTask.mockResolvedValue(undefined);
+      mockActivitiesService.logTaskDeleted.mockRejectedValue(
+        new Error("Activity log failed")
+      );
+
+      const consoleSpy = jest.spyOn(console, "error").mockImplementation();
+
+      const result = await service.remove(taskId);
+
+      expect(consoleSpy).toHaveBeenCalledWith(
+        "Failed to log task deletion activity:",
+        expect.any(Error)
+      );
+      expect(result).toEqual({ message: "Task deleted successfully" });
+
+      consoleSpy.mockRestore();
     });
   });
 });

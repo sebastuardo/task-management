@@ -5,13 +5,17 @@ import { UpdateTaskDto } from "./dto/update-task.dto";
 import { TaskFilterDto } from "./dto/task-filter.dto";
 import { TaskCacheService } from "./task-cache.service";
 import { TaskQueryBuilder } from "./task-query-builder.service";
+import { ActivitiesService } from "../activities/activities.service";
+import { ActivityTrackerService } from "../activities/activity-tracker.service";
 
 @Injectable()
 export class TasksService {
   constructor(
     private emailService: EmailService,
     private taskCache: TaskCacheService,
-    private taskQuery: TaskQueryBuilder
+    private taskQuery: TaskQueryBuilder,
+    private activitiesService: ActivitiesService,
+    private activityTracker: ActivityTrackerService
   ) {}
 
   async findAll(filterDto: TaskFilterDto) {
@@ -85,8 +89,16 @@ export class TasksService {
     const task = await this.taskQuery.createTask(taskData);
 
     await this.taskCache.cacheTask(task.id, task);
-
     await this.taskCache.invalidateListCaches();
+
+    // Log activity: Task created
+    // TODO: Replace with actual user ID from authentication context
+    const userId = createTaskDto.assigneeId || task.project.id; // Fallback strategy
+    try {
+      await this.activitiesService.logTaskCreated(task.id, userId);
+    } catch (error) {
+      console.error("Failed to log task creation activity:", error);
+    }
 
     if (task.assignee) {
       this.emailService
@@ -123,6 +135,41 @@ export class TasksService {
 
     await this.taskCache.invalidateTaskCaches(id);
 
+    // Detect changes and log activity
+    // TODO: Replace with actual user ID from authentication context
+    const userId =
+      updateTaskDto.assigneeId ||
+      (existingTask as any).assigneeId ||
+      (existingTask as any).project.id;
+    try {
+      // Create new task object with updated values for comparison
+      const newTaskForComparison = {
+        title: updateTaskDto.title ?? existingTask.title,
+        description: updateTaskDto.description ?? existingTask.description,
+        status: updateTaskDto.status ?? existingTask.status,
+        priority: updateTaskDto.priority ?? existingTask.priority,
+        dueDate: updateTaskDto.dueDate ?? existingTask.dueDate,
+        assigneeId:
+          updateTaskDto.assigneeId !== undefined
+            ? updateTaskDto.assigneeId
+            : (existingTask as any).assigneeId,
+        tags: updateTaskDto.tagIds
+          ? updateTaskDto.tagIds.map((id) => ({ id }))
+          : (existingTask as any).tags,
+      };
+
+      const changes = this.activityTracker.detectTaskChanges(
+        existingTask,
+        newTaskForComparison
+      );
+
+      if (Object.keys(changes).length > 0) {
+        await this.activitiesService.logTaskUpdated(task.id, userId, changes);
+      }
+    } catch (error) {
+      console.error("Failed to log task update activity:", error);
+    }
+
     if (
       updateTaskDto.assigneeId &&
       updateTaskDto.assigneeId !== (existingTask as any).assigneeId
@@ -138,10 +185,19 @@ export class TasksService {
   }
 
   async remove(id: string) {
-    await this.findOne(id);
+    const existingTask = await this.findOne(id);
+
+    // Log activity BEFORE deleting the task
+    // TODO: Replace with actual user ID from authentication context
+    const userId =
+      (existingTask as any).assigneeId || (existingTask as any).project.id;
+    try {
+      await this.activitiesService.logTaskDeleted(id, userId);
+    } catch (error) {
+      console.error("Failed to log task deletion activity:", error);
+    }
 
     await this.taskQuery.deleteTask(id);
-
     await this.taskCache.invalidateTaskCaches(id);
 
     return { message: "Task deleted successfully" };
