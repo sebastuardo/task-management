@@ -73,6 +73,15 @@ describe("TasksController (e2e)", () => {
   });
 
   it("/tasks (POST) - should send email asynchronously without blocking", async () => {
+    // Get existing project and user IDs from the database
+    const projectsResponse = await request(app.getHttpServer()).get(
+      "/projects"
+    );
+    const usersResponse = await request(app.getHttpServer()).get("/users");
+
+    const projectId = projectsResponse.body[0]?.id;
+    const userId = usersResponse.body[0]?.id;
+
     const startTime = Date.now();
 
     const response = await request(app.getHttpServer())
@@ -80,8 +89,8 @@ describe("TasksController (e2e)", () => {
       .send({
         title: "Test Task",
         description: "Test Description",
-        projectId: "44ddfd56-4846-4e54-a552-a7af2535ae89", // Valid project ID from seed
-        assigneeId: "94217929-6631-4cd9-bcc0-d6bc55c0a96d", // Valid user ID from seed
+        projectId: projectId,
+        assigneeId: userId,
       })
       .expect(201);
 

@@ -18,15 +18,24 @@ import { redisStore } from "cache-manager-redis-yet";
       imports: [ConfigModule],
       inject: [ConfigService],
       useFactory: async (configService: ConfigService) => {
-        const redisHost = configService.get<string>("REDIS_HOST", "localhost");
-        const redisPort = configService.get<number>("REDIS_PORT", 6379);
+        const redisUrl = configService.get<string>(
+          "REDIS_URL",
+          "redis://localhost:6379"
+        );
 
-        return {
-          store: await redisStore({
-            url: `redis://${redisHost}:${redisPort}`,
+        try {
+          const store = await redisStore({
+            url: redisUrl,
             pingInterval: 5 * 1000,
-          }),
-        };
+          });
+
+          console.log(`Redis connected successfully: ${redisUrl}`);
+
+          return { store };
+        } catch (error) {
+          console.error(`Redis connection failed: ${redisUrl}`, error.message);
+          throw error;
+        }
       },
     }),
     PrismaModule,
