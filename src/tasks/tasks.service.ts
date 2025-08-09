@@ -1,112 +1,97 @@
 import { Injectable, NotFoundException } from "@nestjs/common";
-import { PrismaService } from "../prisma/prisma.service";
 import { EmailService } from "../email/email.service";
 import { CreateTaskDto } from "./dto/create-task.dto";
 import { UpdateTaskDto } from "./dto/update-task.dto";
 import { TaskFilterDto } from "./dto/task-filter.dto";
-import { Prisma } from "@prisma/client";
+import { TaskCacheService } from "./task-cache.service";
+import { TaskQueryBuilder } from "./task-query-builder.service";
 
 @Injectable()
 export class TasksService {
   constructor(
-    private prisma: PrismaService,
-    private emailService: EmailService
+    private emailService: EmailService,
+    private taskCache: TaskCacheService,
+    private taskQuery: TaskQueryBuilder
   ) {}
 
   async findAll(filterDto: TaskFilterDto) {
-    // Build the where clause based on filters
-    const where: any = {};
+    const cacheKey = this.taskCache.generateListCacheKey(filterDto);
 
-    if (filterDto.status) {
-      where.status = filterDto.status;
+    try {
+      const tasks = await this.taskCache.wrapTaskQuery(
+        cacheKey,
+        () => this.taskQuery.executeTaskListQuery(filterDto),
+        this.taskCache.TASK_LIST_TTL
+      );
+
+      return tasks;
+    } catch (error) {
+      console.error("Cache error in findAll, using fallback:", error.message);
+      return this.taskQuery.executeTaskListQuery(filterDto);
     }
-
-    if (filterDto.priority) {
-      where.priority = filterDto.priority;
-    }
-
-    if (filterDto.assigneeId) {
-      where.assigneeId = filterDto.assigneeId;
-    }
-
-    if (filterDto.projectId) {
-      where.projectId = filterDto.projectId;
-    }
-
-    if (filterDto.dueDateFrom || filterDto.dueDateTo) {
-      where.dueDate = {};
-
-      if (filterDto.dueDateFrom) {
-        where.dueDate.gte = new Date(filterDto.dueDateFrom);
-      }
-
-      if (filterDto.dueDateTo) {
-        where.dueDate.lte = new Date(filterDto.dueDateTo);
-      }
-    }
-
-    // Single optimized query with all relations included
-    const tasks = await this.prisma.task.findMany({
-      where,
-      include: {
-        assignee: true,
-        project: true,
-        tags: true,
-      },
-      orderBy: {
-        createdAt: "desc",
-      },
-    });
-
-    return tasks;
   }
 
   async findOne(id: string) {
-    const task = await this.prisma.task.findUnique({
-      where: { id },
-      include: {
-        assignee: true,
-        project: true,
-        tags: true,
-      },
-    });
+    const cacheKey = this.taskCache.generateItemCacheKey(id);
 
-    if (!task) {
-      throw new NotFoundException(`Task with ID ${id} not found`);
+    try {
+      const task = await this.taskCache.wrapTaskQuery(
+        cacheKey,
+        async () => {
+          const task = await this.taskQuery.executeTaskQuery(id);
+
+          if (!task) {
+            throw new NotFoundException(`Task with ID ${id} not found`);
+          }
+
+          return task;
+        },
+        this.taskCache.TASK_ITEM_TTL
+      );
+
+      return task;
+    } catch (error) {
+      if (error instanceof NotFoundException) {
+        throw error;
+      }
+      console.error("Cache error in findOne, using fallback:", error.message);
+
+      const task = await this.taskQuery.executeTaskQuery(id);
+
+      if (!task) {
+        throw new NotFoundException(`Task with ID ${id} not found`);
+      }
+
+      return task;
     }
-
-    return task;
   }
 
   async create(createTaskDto: CreateTaskDto) {
-    const task = await this.prisma.task.create({
-      data: {
-        title: createTaskDto.title,
-        description: createTaskDto.description,
-        status: createTaskDto.status,
-        priority: createTaskDto.priority,
-        dueDate: createTaskDto.dueDate,
-        project: { connect: { id: createTaskDto.projectId } },
-        assignee: createTaskDto.assigneeId
-          ? { connect: { id: createTaskDto.assigneeId } }
-          : undefined,
-        tags: createTaskDto.tagIds
-          ? { connect: createTaskDto.tagIds.map((id) => ({ id })) }
-          : undefined,
-      },
-      include: {
-        assignee: true,
-        project: true,
-        tags: true,
-      },
-    });
+    const taskData = {
+      title: createTaskDto.title,
+      description: createTaskDto.description,
+      status: createTaskDto.status,
+      priority: createTaskDto.priority,
+      dueDate: createTaskDto.dueDate,
+      project: { connect: { id: createTaskDto.projectId } },
+      assignee: createTaskDto.assigneeId
+        ? { connect: { id: createTaskDto.assigneeId } }
+        : undefined,
+      tags: createTaskDto.tagIds
+        ? { connect: createTaskDto.tagIds.map((id) => ({ id })) }
+        : undefined,
+    };
 
-    // PERFORMANCE FIX: Send email asynchronously without blocking response
+    const task = await this.taskQuery.createTask(taskData);
+
+    await this.taskCache.cacheTask(task.id, task);
+
+    await this.taskCache.invalidateListCaches();
+
     if (task.assignee) {
       this.emailService
         .sendTaskAssignmentNotification(task.assignee.email, task.title)
         .catch((error) => {
-          // Log error but don't fail the request
           console.error("Failed to send task assignment notification:", error);
         });
     }
@@ -117,40 +102,34 @@ export class TasksService {
   async update(id: string, updateTaskDto: UpdateTaskDto) {
     const existingTask = await this.findOne(id);
 
-    const task = await this.prisma.task.update({
-      where: { id },
-      data: {
-        title: updateTaskDto.title,
-        description: updateTaskDto.description,
-        status: updateTaskDto.status,
-        priority: updateTaskDto.priority,
-        dueDate: updateTaskDto.dueDate,
-        assignee:
-          updateTaskDto.assigneeId !== undefined
-            ? updateTaskDto.assigneeId
-              ? { connect: { id: updateTaskDto.assigneeId } }
-              : { disconnect: true }
-            : undefined,
-        tags: updateTaskDto.tagIds
-          ? { set: updateTaskDto.tagIds.map((id) => ({ id })) }
+    const updateData = {
+      title: updateTaskDto.title,
+      description: updateTaskDto.description,
+      status: updateTaskDto.status,
+      priority: updateTaskDto.priority,
+      dueDate: updateTaskDto.dueDate,
+      assignee:
+        updateTaskDto.assigneeId !== undefined
+          ? updateTaskDto.assigneeId
+            ? { connect: { id: updateTaskDto.assigneeId } }
+            : { disconnect: true }
           : undefined,
-      },
-      include: {
-        assignee: true,
-        project: true,
-        tags: true,
-      },
-    });
+      tags: updateTaskDto.tagIds
+        ? { set: updateTaskDto.tagIds.map((id) => ({ id })) }
+        : undefined,
+    };
 
-    // PERFORMANCE FIX: Send email asynchronously without blocking response
+    const task = await this.taskQuery.updateTask(id, updateData);
+
+    await this.taskCache.invalidateTaskCaches(id);
+
     if (
       updateTaskDto.assigneeId &&
-      updateTaskDto.assigneeId !== existingTask.assigneeId
+      updateTaskDto.assigneeId !== (existingTask as any).assigneeId
     ) {
       this.emailService
         .sendTaskAssignmentNotification(task.assignee!.email, task.title)
         .catch((error) => {
-          // Log error but don't fail the request
           console.error("Failed to send task assignment notification:", error);
         });
     }
@@ -161,9 +140,9 @@ export class TasksService {
   async remove(id: string) {
     await this.findOne(id);
 
-    await this.prisma.task.delete({
-      where: { id },
-    });
+    await this.taskQuery.deleteTask(id);
+
+    await this.taskCache.invalidateTaskCaches(id);
 
     return { message: "Task deleted successfully" };
   }
