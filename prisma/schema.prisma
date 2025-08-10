@@ -43,6 +43,16 @@ model Task {
   assignee    User?    @relation(fields: [assigneeId], references: [id])
 
   tags        Tag[]
+
+  @@index([status])
+  @@index([priority])
+  @@index([assigneeId])
+  @@index([projectId])
+  @@index([dueDate])
+  @@index([status, priority])
+  @@index([projectId, status])
+  @@index([assigneeId, status])
+  @@index([dueDate, status])
 }
 
 model Tag {
