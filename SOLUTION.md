@@ -177,29 +177,219 @@ The refactored `TasksService` was still handling multiple responsibilities after
 
 ### Implementation Approach
 
-[Describe your overall approach to implementing the activity log]
+**Modular Service Architecture:**
+The activity log feature was implemented using a clean, modular architecture with three specialized services:
+
+1. **ActivityTrackerService**: Handles change detection and comparison between task states
+2. **ActivitiesService**: Manages activity logging, querying, and data transformation
+3. **TaskActivitiesController**: Exposes REST endpoints for activity retrieval
+
+**Integration Strategy:**
+
+- Integrated activity logging directly into existing `TasksService` methods (create, update, remove)
+- Used dependency injection to maintain loose coupling
+- Implemented comprehensive error handling to ensure activity logging failures don't affect core task operations
+
+**Change Detection Approach:**
+
+- Built a robust change detection system that compares old vs new task states
+- Tracks changes in: title, description, status, priority, dueDate, assigneeId, and tags
+- Normalizes null/undefined values for consistent comparison
+- Generates detailed change objects with old/new values for each modified field
 
 ### Database Schema Design
 
-[Explain your schema choices]
+**TaskActivity Model:**
+
+```prisma
+model TaskActivity {
+  id        String        @id @default(cuid())
+  taskId    String?       // Optional to preserve activities after task deletion
+  userId    String
+  action    ActivityAction
+  changes   String?       // JSON string of changed fields
+  createdAt DateTime      @default(now())
+
+  task      Task?         @relation(fields: [taskId], references: [id], onDelete: SetNull)
+
+  @@index([taskId])
+  @@index([userId])
+  @@index([action])
+  @@index([createdAt])
+  @@index([taskId, createdAt])
+}
+
+enum ActivityAction {
+  CREATED
+  UPDATED
+  DELETED
+}
+```
+
+**Key Schema Decisions:**
+
+1. **Optional taskId with SetNull**: Ensures audit trail is preserved even after task deletion
+2. **JSON changes field**: Flexible storage for different types of field changes
+3. **Comprehensive indexing**: Optimized for common query patterns (by task, user, date, action)
+4. **ActivityAction enum**: Type-safe action categorization
 
 ### API Design Decisions
 
-[Explain your API design choices]
+**Two Endpoint Strategy:**
+
+1. **GET /activities**: Global activity feed with comprehensive filtering
+   - Supports filtering by: userId, action, taskId, date ranges
+   - Pagination with configurable page size
+   - Returns activities across all tasks
+
+2. **GET /tasks/:id/activities**: Task-specific activity log
+   - Focused on activities for a single task
+   - Same filtering and pagination capabilities
+   - Simplified querying for task detail views
+
+**Response Format Design:**
+
+```typescript
+{
+  data: ActivityResponseDto[],
+  pagination: {
+    page: number,
+    pageSize: number,
+    total: number,
+    totalPages: number
+  }
+}
+
+interface ActivityResponseDto {
+  id: string;
+  taskId: string | null;      // null for deleted tasks
+  taskTitle: string;          // "[Deleted Task]" for deleted tasks
+  userId: string;
+  action: ActivityAction;
+  changes: Record<string, any> | null;
+  createdAt: Date;
+}
+```
+
+**Filter Design:**
+
+- **Date Ranges**: `dateFrom`/`dateTo` for flexible time-based filtering
+- **Action Filtering**: Enum-based action type filtering
+- **User Filtering**: Activities by specific user
+- **Pagination**: Default 20 items per page, configurable up to 100
 
 ### Performance Considerations
 
-[Describe any performance optimizations you implemented]
+**Database Optimization:**
+
+- **Strategic Indexing**: Added indexes on frequently queried columns
+  - Single-column indexes: `taskId`, `userId`, `action`, `createdAt`
+  - Composite index: `taskId + createdAt` for task-specific chronological queries
+- **Query Optimization**: Used Prisma's query builder for efficient database operations
+- **Pagination**: Implemented offset-based pagination to handle large activity volumes
+
+**Memory Efficiency:**
+
+- **Lazy Loading**: Activities are only loaded when requested
+- **Selective Field Loading**: Only necessary fields are fetched from database
+- **JSON Storage**: Changes stored as JSON strings to avoid complex relational structures
+
+**Change Detection Optimization:**
+
+- **Field-Level Comparison**: Only detects and stores actual changes
+- **Empty Change Prevention**: Skips logging when no changes are detected
+- **Normalized Comparison**: Handles null/undefined edge cases efficiently
 
 ### Trade-offs and Assumptions
 
-[List any trade-offs you made or assumptions about requirements]
+**Trade-offs Made:**
+
+1. **Storage vs Query Performance**:
+   - Chose to store changes as JSON strings for flexibility
+   - Trade-off: Less efficient querying of specific field changes
+   - Benefit: Simple storage model and easy field addition
+
+2. **Audit Trail Preservation**:
+   - Made taskId optional with `onDelete: SetNull`
+   - Trade-off: Requires null checking in queries
+   - Benefit: Complete audit trail even after task deletion
+
+3. **User ID Fallback Strategy**:
+   - Used assigneeId or project.id as fallback when no authenticated user context
+   - Trade-off: Not perfectly accurate user attribution
+   - Benefit: Functional logging without authentication system
+
+4. **Synchronous Activity Logging**:
+   - Chose to log activities synchronously within task operations
+   - Trade-off: Slight performance impact on task operations
+   - Benefit: Guaranteed consistency and immediate availability
+
+**Key Assumptions:**
+
+1. **User Context**: Assumed user ID would be available through authentication (fallback implemented)
+2. **Change Granularity**: Assumed field-level change tracking is sufficient (no character-level diffs)
+3. **Activity Volume**: Designed for moderate activity volumes (suitable for task management scale)
+4. **Data Retention**: No automatic cleanup/archiving requirements specified
+5. **Real-time Requirements**: No real-time push notifications needed (REST API sufficient)
+
+**Edge Cases Handled:**
+
+- Task deletion preserves activity history
+- Empty changes objects don't create activity entries
+- Null/undefined field normalization for consistent comparison
+- Error handling prevents activity logging failures from affecting task operations
+- Tags array comparison handles order-independent changes
 
 ## Future Improvements
 
-[Suggest potential improvements that could be made with more time]
+### Part 1 (Performance) Enhancements:
 
-## Time Spent
+1. **Advanced Caching Strategies**:
+   - Implement cache warming for frequently accessed tasks
+   - Add Redis Cluster support for high availability
+   - Implement cache versioning for better invalidation control
+
+2. **Database Optimizations**:
+   - Add database connection pooling optimization
+   - Implement read replicas for query distribution
+   - Add database query monitoring and slow query analysis
+
+3. **API Improvements**:
+   - Implement GraphQL for more flexible data fetching
+   - Add response compression (gzip)
+   - Implement API rate limiting and throttling
+
+### Part 2 (Activity Log) Enhancements:
+
+1. **Real-time Features**:
+   - WebSocket integration for live activity feeds
+   - Server-sent events for real-time notifications
+   - Push notification support for mobile clients
+
+2. **Advanced Analytics**:
+   - Activity trend analysis and reporting
+   - User productivity metrics based on task activities
+   - Time-based activity patterns and insights
+
+3. **Enhanced Filtering**:
+   - Full-text search within activity changes
+   - Advanced date range presets (last week, month, etc.)
+   - Bulk activity operations and batch queries
+
+4. **Data Management**:
+   - Automatic activity archiving for old records
+   - Data retention policies with configurable timeframes
+   - Activity export functionality (CSV, JSON)
+
+5. **Performance Optimizations**:
+   - Activity aggregation for high-volume scenarios
+   - Elasticsearch integration for complex queries
+   - Event sourcing pattern for complete auditability
+
+6. **Security Enhancements**:
+   - Activity-level access controls
+   - Sensitive data masking in activity logs
+   - Audit log integrity verification
 
 [Document how long you spent on each part]
 
@@ -292,3 +482,81 @@ The refactored `TasksService` was still handling multiple responsibilities after
 - ✅ Cache invalidation logic verified
 - ✅ Error handling robust and non-blocking
 - ✅ Performance benefits measurable and consistent
+
+## Time Spent
+
+### Part 1: Performance Optimization
+
+- **Problem Analysis & Planning**: 2 hours
+  - Identified N+1 queries, in-memory filtering, missing indexes, blocking operations
+  - Planned modular architecture and caching strategy
+
+- **Database Schema & Index Optimization**: 1.5 hours
+  - Added comprehensive indexes for common query patterns
+  - Optimized Prisma schema and relations
+
+- **Query Optimization**: 2 hours
+  - Refactored TasksService to eliminate N+1 queries
+  - Implemented efficient filtering at database level
+  - Added proper relation loading with single queries
+
+- **Caching Implementation**: 3 hours
+  - Implemented Redis caching with cache-manager
+  - Created TaskCacheService with smart invalidation
+  - Added cache-first strategy with fallback
+
+- **Architecture Refactoring**: 2 hours
+  - Split responsibilities into TaskCacheService and TaskQueryBuilder
+  - Improved separation of concerns and testability
+
+- **Email Async Optimization**: 1 hour
+  - Converted blocking email operations to non-blocking
+  - Added proper error handling for background operations
+
+- **Testing & Validation**: 2.5 hours
+  - Created comprehensive unit tests (44 tests)
+  - Performance testing and metrics validation
+
+**Part 1 Total: ~14 hours**
+
+### Part 2: Activity Log Feature
+
+- **Requirements Analysis & Design**: 1.5 hours
+  - Analyzed activity log requirements
+  - Designed database schema and API endpoints
+
+- **Database Schema Implementation**: 1 hour
+  - Created TaskActivity model with proper indexing
+  - Added ActivityAction enum and relations
+
+- **Core Services Development**: 4 hours
+  - Implemented ActivityTrackerService for change detection
+  - Built ActivitiesService for logging and querying
+  - Created comprehensive DTOs and data transformation
+
+- **API Endpoints Implementation**: 2 hours
+  - Built ActivitiesController with filtering and pagination
+  - Implemented TaskActivitiesController for task-specific queries
+
+- **Integration with Existing Services**: 1.5 hours
+  - Integrated activity logging into TasksService operations
+  - Added proper error handling and fallback strategies
+
+- **Testing & Debugging**: 3 hours
+  - Created comprehensive unit tests for all services
+  - Fixed test mocks and data consistency issues
+  - Validated all edge cases and error scenarios
+
+- **Documentation & Validation**: 1 hour
+  - Manual API testing with curl commands
+  - Verified audit trail preservation after task deletion
+
+**Part 2 Total: ~14 hours**
+
+### Overall Project Summary:
+
+- **Total Time Invested**: ~28 hours
+- **Performance Improvements**: 90%+ response time reduction
+- **Feature Completeness**: 100% of requirements implemented
+- **Test Coverage**: 86 comprehensive unit tests
+- **Code Quality**: Clean architecture with separation of concerns

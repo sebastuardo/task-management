@@ -85,7 +85,6 @@ export class TasksService {
     const task = await this.taskQuery.createTask(taskData);
 
     await this.taskCache.cacheTask(task.id, task);
-
     await this.taskCache.invalidateListCaches();
 
     if (task.assignee) {
@@ -138,10 +137,9 @@ export class TasksService {
   }
 
   async remove(id: string) {
-    await this.findOne(id);
+    const existingTask = await this.findOne(id);
 
     await this.taskQuery.deleteTask(id);
-
     await this.taskCache.invalidateTaskCaches(id);
 
     return { message: "Task deleted successfully" };

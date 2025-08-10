@@ -15,6 +15,7 @@ model User {
   updatedAt DateTime @updatedAt
 
   assignedTasks Task[]
+  activities    TaskActivity[]
 }
 
 model Project {
@@ -43,6 +44,7 @@ model Task {
   assignee    User?    @relation(fields: [assigneeId], references: [id])
 
   tags        Tag[]
+  activities  TaskActivity[]
 
   @@index([status])
   @@index([priority])
@@ -63,6 +65,25 @@ model Tag {
   tasks     Task[]
 }
 
+model TaskActivity {
+  id        String         @id @default(uuid())
+  taskId    String?
+  userId    String
+  action    ActivityAction
+  changes   Json?
+  createdAt DateTime       @default(now())
+
+  task      Task?          @relation(fields: [taskId], references: [id], onDelete: SetNull)
+  user      User           @relation(fields: [userId], references: [id])
+
+  @@index([taskId])
+  @@index([userId])
+  @@index([createdAt])
+  @@index([taskId, createdAt])
+  @@index([action])
+  @@index([userId, createdAt])
+}
+
 enum TaskStatus {
   TODO
   IN_PROGRESS
@@ -75,4 +96,10 @@ enum TaskPriority {
   MEDIUM
   HIGH
   URGENT
+}
+
+enum ActivityAction {
+  CREATED
+  UPDATED
+  DELETED
 }
